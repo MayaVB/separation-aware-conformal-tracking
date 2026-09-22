@@ -1,0 +1,12 @@
+__pycache__/
+*.py[codz]
+*.png
+*.jpg
+*.jpeg
+*.fig
+*.pdf
+/data
+/Results/
+/Results_*/
+/old/
+.hypothesis/

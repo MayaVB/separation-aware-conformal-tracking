@@ -1,0 +1,69 @@
+
+# activate env
+conda activate uq_ssl
+
+# copy data
+cp -r /home/dsi/mayavb/PythonProjects/SRP-DNN/data/npz_output_tracking_no_burst_calib/ /home/dsi/mayavb/PythonProjects/UQ_in_multi_SSL/data/
+cp -r /home/dsi/mayavb/PythonProjects/SRP-DNN/data/npz_output_tracking_burst_test/ /home/dsi/mayavb/PythonProjects/UQ_in_multi_SSL/data/
+cp -r /home/dsi/mayavb/PythonProjects/SRP-DNN/data/npz_output_tracking_cloud_test_norm/ /home/dsi/mayavb/PythonProjects/UQ_in_multi_SSL/data/
+cp -r /home/dsi/mayavb/PythonProjects/SRP-DNN/data/npz_output_tracking_diffuse_test_norm/ /home/dsi/mayavb/PythonProjects/UQ_in_multi_SSL/data/
+
+
+# baseline
+CUDA_VISIBLE_DEVICES=1 python CRC_SSL_N.py \
+  --plot 0 \
+  --num_iterations 5 \
+  --seed 1234567890 \
+  --snr 15 \
+  --reverb 400 \
+  --speakers 2 \
+  --speakers 2 \
+  --Kmax 2 \
+  --lambda_steps 500 \
+  --significance_levels 0.1 0.05 \
+  --tracking_path data/npz_output_tracking_no_burst_calib/Reverb_400_ms_SNR_15_dB/speakers_2_flat.npz
+
+# bursts not calibrated
+CUDA_VISIBLE_DEVICES=0 python CRC_SSL_N.py \
+  --plot 1 \
+  --num_iterations 5 \
+  --seed 1234567890 \
+  --snr 15 \
+  --reverb 400 \
+  --speakers 2 \
+  --Kmax 2 \
+  --lambda_steps 500 \
+  --significance_levels 0.1 0.05 \
+  --tracking_calib_path data/npz_output_tracking_no_burst_calib/Reverb_400_ms_SNR_15_dB/speakers_2_flat.npz \
+  --tracking_test_path  data/npz_output_tracking_burst_test/Reverb_400_ms_SNR_15_dB/speakers_2_flat.npz
+# set_19, set_20, set_21, set_22, set_167, set_168, set_169, set_202–204, set_212–213, set_240–241, set_312–313, set_321–323, set_448–450, ... 
+
+
+python eval_heatmap_noburst.py \
+  --npz_path data/npz_output_tracking_no_burst_calib/Reverb_400_ms_SNR_15_dB/speakers_2_flat.npz
+
+
+python eval_heatmap_noburst.py  \
+  --npz_path data/npz_output_tracking_burst_test/Reverb_400_ms_SNR_15_dB/speakers_2_flat.npz
+
+
+CUDA_VISIBLE_DEVICES=0 python CRC_SSL_N.py \
+  --num_iterations 5 --seed 1234567890 \
+  --snr 15 --reverb 400 --speakers 2 --Kmax 2 \
+  --lambda_steps 500 --significance_levels 0.1 0.05 \
+  --tracking_calib_path data/npz_output_tracking_no_burst_calib/Reverb_400_ms_SNR_15_dB/speakers_2_flat.npz \
+  --tracking_test_path  data/npz_output_tracking_burst_test/Reverb_400_ms_SNR_15_dB/speakers_2_flat.npz
+
+
+CUDA_VISIBLE_DEVICES=1 python CRC_SSL_N.py \
+  --plot 0 \
+  --num_iterations 5 \
+  --seed 1234567890 \
+  --snr 15 \
+  --reverb 400 \
+  --speakers 2 \
+  --speakers 2 \
+  --Kmax 2 \
+  --lambda_steps 500 \
+  --significance_levels 0.1 0.05 \
+  --tracking_path data/npz_output_tracking_diffuse_test_norm/Reverb_400_ms_SNR_15_dB/speakers_2_flat.npz

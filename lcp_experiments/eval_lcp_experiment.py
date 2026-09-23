@@ -7,6 +7,9 @@ pipeline -- see Code/two_speaker_tracking/lcp.py's module docstring for the
 full design (context features, score construction, binary_fill_holes caveat).
 """
 
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..")))
+
 import argparse
 import os
 

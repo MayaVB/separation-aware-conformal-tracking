@@ -131,6 +131,9 @@ true-D-based category construction, lambda_star-based or test-data-based
 boundary selection, LCP/Algorithm 7.8, cancellation features.
 """
 
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..")))
+
 import argparse
 import json
 import os

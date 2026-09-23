@@ -18,6 +18,9 @@ always uses the clean no_burst_calib set while testing on burst/cloud/diffuse
 independent of the perturbation itself.
 """
 
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..")))
+
 import argparse
 import os
 

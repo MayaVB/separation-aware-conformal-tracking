@@ -43,6 +43,9 @@ Does not touch the tracker, Code/crc_ssl.py, the npz export pipeline,
 compute_raw_context_features, or eval_lcp_repeated_splits.py.
 """
 
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..")))
+
 import argparse
 import json
 import os

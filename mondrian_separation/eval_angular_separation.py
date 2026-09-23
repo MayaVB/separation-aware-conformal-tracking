@@ -32,6 +32,9 @@ x K=2 speakers -- --n_frames_per_scene subsamples a fixed number of frames per
 already uses for calibration/test frame pools.
 """
 
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..")))
+
 import argparse
 import json
 import os

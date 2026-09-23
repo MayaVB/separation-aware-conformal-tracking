@@ -32,6 +32,9 @@ tracker, or the npz export pipeline. Does not clip/cap/transform
 Delta_hat and does not special-case the >63deg tail.
 """
 
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..")))
+
 import argparse
 import json
 import os

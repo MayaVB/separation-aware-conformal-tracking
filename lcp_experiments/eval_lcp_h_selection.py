@@ -24,6 +24,9 @@ LCP context features (still the 2-D raw_mean/raw_peak_to_background of the
 original implementation).
 """
 
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..")))
+
 import argparse
 import json
 import os

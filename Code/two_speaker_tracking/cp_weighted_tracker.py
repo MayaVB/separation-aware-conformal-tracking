@@ -132,7 +132,8 @@ class CPWeightedFusionTracker:
     @classmethod
     def for_mondrian(cls, **kwargs):
         """Main method: A-only weight with gamma_M = 32. Feed it the Mondrian-hatD
-        (M=5) CP regions as `cp_regions`; the tracker itself is region-agnostic."""
+        (M=5) CP regions as `cp_regions` (build them with mondrian.calibrate_mondrian +
+        mondrian.build_mondrian_regions); the tracker itself is region-agnostic."""
         return cls.a_only(GAMMA_MONDRIAN, **kwargs)
 
     @classmethod

@@ -9,11 +9,27 @@ region area. `CPWeightedFusionTracker.for_mondrian()` uses gamma = 32 and is fed
 Mondrian-hatD (M = 5) CP regions. `for_global()` uses gamma = 16 with Global CP regions.
 The tracker takes whichever CP regions it is given.
 
+The Mondrian-hatD CP regions come from `Code/two_speaker_tracking/mondrian.py`:
+hatD is the great-circle separation of the two estimated DOAs (no ground truth), M = 5
+equal-frequency groups are formed from calibration hatD only, and a separate threshold
+lambda[m, k] is calibrated per group and detection slot with the same conformal rule as
+Global CP.
+
+```python
+from Code.two_speaker_tracking.mondrian import calibrate_mondrian, build_mondrian_regions
+from Code.two_speaker_tracking.cp_weighted_tracker import CPWeightedFusionTracker
+
+calib = calibrate_mondrian(lm_calib, est_calib, true_calib, room, lambda_list, alpha=0.1)
+regions, groups = build_mondrian_regions(lm, est, calib, nele=37, nazi=73)
+result = CPWeightedFusionTracker.for_mondrian().run(lm, regions, est_grid)
+```
+
 ## Layout
 
 | Path | Contents |
 |---|---|
-| `Code/two_speaker_tracking/` | Tracker, CP weight/features, association, LCP, npz adapter, metrics |
+| `Code/two_speaker_tracking/` | Tracker, CP weight/features, association, Mondrian-hatD CP (`mondrian.py`), LCP, npz adapter, metrics |
+| `tests/` | Deterministic tracker tests (association, azimuth wrap-around, periodic span/dispersion); `python3 tests/test_cp_weighted_tracker_association.py` |
 | `examples/` | Small runnable tracker demos |
 | `analysis/mondrian_separation/` | Angular-separation (D) analysis and Mondrian-hatD experiments; scripts import each other, so keep them together |
 | `analysis/lcp_experiments/` | LCP feature-selection experiments |

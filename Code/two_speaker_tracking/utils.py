@@ -5,6 +5,89 @@ These are small, stateless functions that other modules import.
 """
 
 import numpy as np
+from scipy.ndimage import gaussian_filter
+
+
+# ---------------------------------------------------------------------------
+# SRP-DNN grid geometry
+# ---------------------------------------------------------------------------
+# The exported maps live on
+#     ele_grid = linspace(0, pi, nele)     polar angle from +z (Dataset.cart2sph)
+#     azi_grid = linspace(-pi, pi, nazi)   so column 0 (-pi) and column nazi-1
+#                                          (+pi) are the SAME direction.
+# The model evaluates that direction twice (verified: col 0 == col 72 exactly
+# in the exported maps), so there are only nazi-1 distinct azimuths, spaced
+# 2*pi/(nazi-1) apart, and the azimuth axis is periodic with period nazi-1.
+
+def grid_index_to_angles(grid_idx, grid_shape):
+    """[el_idx, az_idx] (any leading shape, float ok) -> (ele, azi) radians."""
+    grid_idx = np.asarray(grid_idx, dtype=float)
+    nele, nazi = int(grid_shape[0]), int(grid_shape[1])
+    ele = grid_idx[..., 0] * (np.pi / (nele - 1))
+    azi = -np.pi + grid_idx[..., 1] * (2.0 * np.pi / (nazi - 1))
+    return ele, azi
+
+
+def great_circle_deg(ele_a, azi_a, ele_b, azi_b):
+    """Great-circle angle (degrees) between DOAs given as polar elevation
+    (from +z) and azimuth, radians. Vectorized. Periodic in azimuth by
+    construction and correct near the poles."""
+    cos_d = (np.cos(ele_a) * np.cos(ele_b)
+             + np.sin(ele_a) * np.sin(ele_b) * np.cos(azi_a - azi_b))
+    return np.degrees(np.arccos(np.clip(cos_d, -1.0, 1.0)))
+
+
+def great_circle_distance_grid(a, b, grid_shape):
+    """Great-circle angle (degrees) between two [el_idx, az_idx] grid positions."""
+    ele_a, azi_a = grid_index_to_angles(a, grid_shape)
+    ele_b, azi_b = grid_index_to_angles(b, grid_shape)
+    return float(great_circle_deg(ele_a, azi_a, ele_b, azi_b))
+
+
+def fold_azimuth_endpoint(arr, kind):
+    """(..., nele, nazi) map on the duplicated-endpoint grid -> (..., nele, nazi-1)
+    map on the nazi-1 distinct azimuths (column 0 = the +-pi direction).
+
+    kind="mass"       : a probability mass split over the two duplicate columns
+                        -> SUM them (total mass preserved).
+    kind="likelihood" : two evaluations of the same direction
+                        -> AVERAGE them (a direction is not counted twice).
+    """
+    arr = np.asarray(arr, dtype=float)
+    out = arr[..., :-1].copy()
+    if kind == "mass":
+        out[..., 0] += arr[..., -1]
+    elif kind == "likelihood":
+        out[..., 0] = 0.5 * (arr[..., 0] + arr[..., -1])
+    else:
+        raise ValueError(f"kind must be 'mass' or 'likelihood', got {kind!r}")
+    return out
+
+
+def unfold_azimuth_endpoint(folded):
+    """Inverse of fold_azimuth_endpoint(kind="mass"): the +-pi mass is split
+    equally over columns 0 and nazi-1. fold(unfold(x), "mass") == x exactly."""
+    folded = np.asarray(folded, dtype=float)
+    out = np.concatenate([folded, folded[..., :1]], axis=-1)
+    out[..., 0] *= 0.5
+    out[..., -1] *= 0.5
+    return out
+
+
+def propagate_belief_periodic_azimuth(belief_folded, sigma_el, sigma_az):
+    """Fixed Gaussian motion propagation T^T b on the FOLDED grid (nele, nazi-1).
+
+    Azimuth: periodic ("wrap") over the nazi-1 distinct columns, so mass near
+    +pi crosses to -pi. Elevation: NOT periodic ("constant", unchanged from
+    the previous behaviour -- mass blurred past a pole is dropped and the
+    result renormalised). Returns a normalised folded belief.
+    """
+    b = gaussian_filter(np.asarray(belief_folded, dtype=float),
+                        sigma=(sigma_el, sigma_az), mode=("constant", "wrap"))
+    s = b.sum()
+    if s > 1e-300:
+        return b / s
+    return np.full(b.shape, 1.0 / b.size)
 
 
 def euclidean_distance(a, b):

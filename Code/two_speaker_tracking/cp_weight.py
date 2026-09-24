@@ -20,6 +20,10 @@ cp_features.extract_cp_features(cp_region=...) -- it has no notion of
 whether that region came from global CP or LCP, so it is generic across
 both by construction.
 
+Main method: area only, i.e. lambda_size = gamma and lambda_var = lambda_span = 0,
+so w = exp(-gamma * A) (see CPWeightedFusionTracker.for_mondrian / .for_global).
+The 3-term defaults below are kept for the exploratory variant only.
+
 lambda_var/lambda_size/lambda_span are NEW, independently tunable
 parameters for this 2-D tracker. They are initialized at the same starting
 values as the 1-D paper's lambda_sp/lambda_sz/lambda_span (1.0, 2.0, 1.0)
@@ -61,9 +65,12 @@ def compute_cp_weight(cp_features, grid_shape,
     diag2 = float((nele - 1) ** 2 + (nazi - 1) ** 2)
     diag = float(np.sqrt(diag2))
 
-    size_raw = cp_features.get("cp_area_norm", np.nan)          # already in [0, 1]
-    span_raw = cp_features.get("cp_width_total", np.nan) / diag  # rescaled
-    var_raw = cp_features.get("cp_var", np.nan) / diag2          # rescaled
+    size_raw = cp_features.get("cp_area_norm", np.nan)                   # already in [0, 1]
+    # S and V use the azimuth-periodic span/dispersion (cp_features.py); falls
+    # back to the old non-periodic keys only for feature dicts that predate them.
+    span_raw = cp_features.get("cp_width_total_periodic",
+                               cp_features.get("cp_width_total", np.nan)) / diag  # rescaled
+    var_raw = cp_features.get("cp_var_periodic", cp_features.get("cp_var", np.nan)) / diag2  # rescaled
 
     # Nonfinite (e.g. empty CP region) -> maximal uncertainty, not a crash.
     # Otherwise clip to [0, 1] -- span_norm in particular can slightly exceed

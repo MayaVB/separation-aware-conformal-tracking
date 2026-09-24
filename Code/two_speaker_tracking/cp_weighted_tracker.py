@@ -10,32 +10,47 @@ replacement -- that class is left untouched as the baseline.
 Fusion principle
 -----------------
 Track state is the FULL belief map over the grid, not a single point.
-Each frame:
+Each frame t >= 1, for tracks k = 0, 1 and IDL measurement slots m = 0, 1:
 
-    b_tilde_t,k = T^T b_t-1,k                                  (1)
-    b_t,k       = (1 - w_t,k) * b_tilde_t,k + w_t,k * p_tilde_t,k  (2)
-    y_hat_t,k   = argmax_y b_t,k(y)                             (3)
+    b_pred_t,k  = T^T b_t-1,k                                       (1)
+    x_pred_t,k  = argmax_y b_pred_t,k(y)                              (2)
+    a_t         = argmin over the 2 permutations of
+                    sum_k GC(x_pred_t,k, z_t,a_t(k))                  (3)
+    b_t,k       = (1 - w_t,a_t(k)) * b_pred_t,k + w_t,a_t(k) * p_t,a_t(k)   (4)
+    y_hat_t,k   = argmax_y b_t,k(y)                                   (5)
 
 (1) Motion propagation: T is a FIXED (not CP-derived) 2-D Gaussian
     transition kernel (sigma_el, sigma_az), applied to the *entire* previous
-    belief map via a Gaussian blur (scipy.ndimage.gaussian_filter) --
-    mathematically the transition-matrix action T^T b on a translation
-    -invariant Gaussian kernel. This is a real recursive Bayes-filter
-    propagation: the previous belief's shape/spread carries forward, not
-    just its argmax.
+    belief map via a Gaussian blur -- the transition-matrix action T^T b of a
+    translation-invariant kernel. Azimuth is periodic, elevation is not (see
+    "Periodic azimuth" below).
 
-(2) Fusion: w_t,k in (0, 1] is a scalar computed purely from speaker k's own
-    CP/LCP region at frame t (see cp_weight.compute_cp_weight) -- CP
-    uncertainty controls ONLY this interpolation weight, never sigma_el/
-    sigma_az. p_tilde_t,k is the full normalized likelihood map, never
-    reduced to a peak before fusion.
+(2)-(3) Association happens AFTER propagation and BEFORE fusion, against
+    the PREDICTED position of each track. GC = great-circle angle between
+    DOAs (association.py). z_t,m is IDL slot m's estimated DOA. Exact
+    2-permutation search.
 
-(3) Each speaker k has its own belief, CP region, descriptors, and weight,
-    computed completely independently of the other speaker.
+(4) Package-level fusion: track k receives the COMPLETE measurement package
+    of its assigned slot a_t(k) -- estimated DOA, likelihood map p (full
+    normalized map, never reduced to a peak), CP-region descriptors A/S/V,
+    and the CP weight w computed from that slot's region
+    (cp_weight.compute_cp_weight). CP uncertainty controls ONLY w, never
+    sigma_el/sigma_az. Then renormalise.
 
-Association (which measurement belongs to which track) is unchanged --
-this module calls the existing associate_two_speakers exactly as
-tracker.py does.
+Frame 0: no prior; b_0,k = p_0,k of the identity assignment (slot k ->
+track k) and the output position is slot k's estimated DOA (same convention
+as TwoSpeakerTracker). Track labels are therefore arbitrary but persistent.
+
+Periodic azimuth
+----------------
+The grid's azimuth axis is linspace(-pi, pi, nazi): columns 0 and nazi-1
+are the same direction. All belief arithmetic is done on the FOLDED grid of
+the nazi-1 distinct azimuths (utils.fold_azimuth_endpoint): a belief (mass)
+folds by summing the two duplicate columns, a likelihood map folds by
+averaging them (two evaluations of one direction). The blur uses
+mode=("constant", "wrap") on the folded grid. Stored/returned beliefs are
+unfolded back to (nele, nazi) by splitting the +-pi mass equally over the two
+duplicate columns, so fold(unfold(b)) == b exactly across frames.
 
 Array shape conventions
 -----------------------
@@ -49,14 +64,22 @@ Array shape conventions
 """
 
 import numpy as np
-from scipy.ndimage import gaussian_filter
 
 from Code.two_speaker_tracking.cp_features import extract_cp_features
 from Code.two_speaker_tracking.association import associate_two_speakers
-from Code.two_speaker_tracking.utils import validate_two_speaker_inputs
+from Code.two_speaker_tracking.utils import (
+    validate_two_speaker_inputs, fold_azimuth_endpoint, unfold_azimuth_endpoint,
+    propagate_belief_periodic_azimuth,
+)
 from Code.two_speaker_tracking.cp_weight import compute_cp_weight
 
 _EPS = 1e-300
+
+# Main method: area-only weight w = exp(-gamma * A), A = normalized CP region
+# area. gamma_M = 32 was selected for Mondrian-hatD (M=5) regions on the
+# close-separation criterion; the Global CP counterpart is frozen at 16.
+GAMMA_MONDRIAN = 32.0
+GAMMA_GLOBAL = 16.0
 
 
 class CPWeightedFusionTracker:
@@ -79,10 +102,14 @@ class CPWeightedFusionTracker:
         Coefficients of the CP-aware weight formula (see
         cp_weight.compute_cp_weight). Starting defaults only -- not tuned
         here.
+    fixed_w : float or None
+        Non-CP baseline: constant fusion weight for every frame/track
+        (fixed_w=1.0 = association only, no temporal fusion). None (default)
+        = CP-derived w.
     """
 
     def __init__(self, n_speakers=2, sigma_el=2.0, sigma_az=2.0,
-                 lambda_var=1.0, lambda_size=2.0, lambda_span=1.0):
+                 lambda_var=1.0, lambda_size=2.0, lambda_span=1.0, fixed_w=None):
         if n_speakers != 2:
             raise ValueError("CPWeightedFusionTracker currently supports exactly 2 speakers.")
         self.n_speakers = n_speakers
@@ -91,7 +118,27 @@ class CPWeightedFusionTracker:
         self.lambda_var = float(lambda_var)
         self.lambda_size = float(lambda_size)
         self.lambda_span = float(lambda_span)
+        # Baseline switch: if not None, every frame/track uses this constant w
+        # instead of the CP-derived one (same association, same motion model;
+        # A/S/V are still computed and reported). None = CP-weighted (default).
+        self.fixed_w = None if fixed_w is None else float(fixed_w)
         self.reset()
+
+    @classmethod
+    def a_only(cls, gamma, **kwargs):
+        """Area-only weight w = exp(-gamma * A); span and dispersion terms off."""
+        return cls(lambda_size=gamma, lambda_span=0.0, lambda_var=0.0, **kwargs)
+
+    @classmethod
+    def for_mondrian(cls, **kwargs):
+        """Main method: A-only weight with gamma_M = 32. Feed it the Mondrian-hatD
+        (M=5) CP regions as `cp_regions`; the tracker itself is region-agnostic."""
+        return cls.a_only(GAMMA_MONDRIAN, **kwargs)
+
+    @classmethod
+    def for_global(cls, **kwargs):
+        """Global-CP baseline: A-only weight with gamma_G = 16."""
+        return cls.a_only(GAMMA_GLOBAL, **kwargs)
 
     # ------------------------------------------------------------------
     # Public interface
@@ -99,9 +146,10 @@ class CPWeightedFusionTracker:
 
     def reset(self):
         """Reset internal state so the tracker can be reused on a new sequence."""
-        # Each track carries both a point "position" (for association, which
-        # only needs a point -- see association.py) and the full "belief"
-        # map (for the recursive T^T b propagation).
+        # Each track carries its last fused point "position" (output only),
+        # and the full "belief" map (unfolded (nele, nazi), for the recursive
+        # T^T b propagation). Association uses the PREDICTED position, which
+        # is recomputed from the belief every frame in step().
         self._tracks = [
             {"position": None, "belief": None, "history": []}
             for _ in range(self.n_speakers)
@@ -110,72 +158,122 @@ class CPWeightedFusionTracker:
         self._cp_features_history = []
         self._posterior_history = []   # list of (2, nele, nazi) belief arrays, one per frame
         self._debug_history = []       # list of (2,) list of {"w","size_norm","span_norm","var_norm"}
+        self._track_diag_history = []  # list of per-frame track-ordered diagnostics (see step())
 
     def step(self, likelihood_maps_t, cp_regions_t, estimated_positions_t):
         """Process a single frame.
 
         Parameters
         ----------
-        likelihood_maps_t : array-like, shape (2, nele, nazi)
-        cp_regions_t      : array-like, shape (2, nele, nazi)
-        estimated_positions_t : array-like, shape (2, 2)
+        likelihood_maps_t : array-like, shape (2, nele, nazi)   -- IDL-slot ordered
+        cp_regions_t      : array-like, shape (2, nele, nazi)   -- IDL-slot ordered
+        estimated_positions_t : array-like, shape (2, 2)        -- IDL-slot ordered
 
         Returns
         -------
         frame_result : dict
-            "positions"   : np.ndarray, shape (2, 2)  – updated track positions
-            "assignment"  : list of int, length 2
-            "cp_features" : list of dict, length 2
-            "posteriors"  : np.ndarray, shape (2, nele, nazi)  – belief maps b_t,k
-            "debug"       : list of dict, length 2  – {"w","size_norm","span_norm","var_norm"}
+            "positions"   : np.ndarray, shape (2, 2)  – updated track positions (TRACK order)
+            "assignment"  : list of int, length 2 – assignment[k] = IDL slot given to track k
+            "cp_features" : list of dict, length 2 – SLOT order (NOT reordered)
+            "posteriors"  : np.ndarray, shape (2, nele, nazi)  – belief maps b_t,k (TRACK order)
+            "debug"       : list of dict, length 2 (TRACK order) – {"w","size_norm","span_norm","var_norm"}
+            "track_diag"  : dict of TRACK-ordered diagnostics, see run()
         """
         likelihood_maps_t = np.asarray(likelihood_maps_t, dtype=float)
         cp_regions_t = np.asarray(cp_regions_t, dtype=float)
         measurements = np.asarray(estimated_positions_t, dtype=float)  # (2, 2)
+        grid_shape = likelihood_maps_t.shape[1:]
+        nele, nazi = grid_shape
 
-        # Step (a): extract CP uncertainty features per speaker candidate.
+        # Step (a): measurement packages, SLOT order. Each slot's CP features
+        # come from that slot's own region/map/DOA; w is derived from them.
         cp_features_t = [
             extract_cp_features(
-                cp_region=cp_regions_t[k],
-                likelihood_map=likelihood_maps_t[k],
-                estimated_position=measurements[k],
+                cp_region=cp_regions_t[m],
+                likelihood_map=likelihood_maps_t[m],
+                estimated_position=measurements[m],
             )
-            for k in range(self.n_speakers)
+            for m in range(self.n_speakers)
         ]
+        slot_w, slot_desc = zip(*[
+            compute_cp_weight(cp_features_t[m], grid_shape,
+                              lambda_var=self.lambda_var, lambda_size=self.lambda_size,
+                              lambda_span=self.lambda_span)
+            for m in range(self.n_speakers)
+        ])
+        if self.fixed_w is not None:
+            slot_w = (self.fixed_w,) * self.n_speakers
 
-        # Step (b): associate measurements to existing tracks. Unchanged --
-        # identical call to tracker.py's.
-        assignment = associate_two_speakers(
-            prev_tracks=self._tracks,
+        # Step (b): propagate each track with the FIXED motion model and read
+        # off its predicted position (frames 1+ only).
+        initialized = self._tracks[0]["belief"] is not None
+        pred_folded = [None] * self.n_speakers
+        pred_positions = [None] * self.n_speakers
+        if initialized:
+            for k in range(self.n_speakers):
+                prev_folded = fold_azimuth_endpoint(self._tracks[k]["belief"], kind="mass")
+                pred_folded[k] = propagate_belief_periodic_azimuth(
+                    prev_folded, self.sigma_el, self.sigma_az)
+                pred_positions[k] = self._argmax_position(pred_folded[k])
+
+        # Step (c): associate the two slot packages to the PREDICTED tracks,
+        # great-circle cost, exact 2-permutation search.
+        assignment, costs = associate_two_speakers(
+            prev_tracks=[{"position": p} for p in pred_positions],
             current_measurements=measurements,
             current_cp_features=cp_features_t,
+            grid_shape=grid_shape,
+            return_costs=True,
         )
 
-        # Step (c): update each track's full belief via CP-weighted fusion.
-        nele, nazi = likelihood_maps_t.shape[1:]
+        # Step (d): each track fuses its assigned slot's COMPLETE package.
         updated_positions = np.empty((self.n_speakers, 2), dtype=float)
         frame_posteriors = np.empty((self.n_speakers, nele, nazi), dtype=float)
         frame_debug = []
-
         for k in range(self.n_speakers):
             m_idx = assignment[k]
-            updated_pos, belief, w, descriptors = self._update_single_track(
-                prev_belief=self._tracks[k]["belief"],
-                measurement=measurements[m_idx],
-                cp_features=cp_features_t[m_idx],
-                likelihood_map=likelihood_maps_t[m_idx],
-            )
+            p_folded = self._normalized_likelihood_folded(likelihood_maps_t[m_idx])
+            if not initialized:
+                belief_folded = p_folded
+                updated_pos = measurements[m_idx].copy()  # mirrors TwoSpeakerTracker's frame-0 convention
+                w_used = np.nan
+                desc_used = {"size_norm": np.nan, "span_norm": np.nan, "var_norm": np.nan}
+            else:
+                w_used = slot_w[m_idx]
+                desc_used = slot_desc[m_idx]
+                belief_folded = (1.0 - w_used) * pred_folded[k] + w_used * p_folded
+                bsum = belief_folded.sum()
+                belief_folded = (belief_folded / bsum if bsum > _EPS
+                                 else np.full(belief_folded.shape, 1.0 / belief_folded.size))
+                updated_pos = self._argmax_position(belief_folded)
+            belief = unfold_azimuth_endpoint(belief_folded)
             self._tracks[k]["position"] = updated_pos
             self._tracks[k]["belief"] = belief
             self._tracks[k]["history"].append(updated_pos.copy())
             updated_positions[k] = updated_pos
             frame_posteriors[k] = belief
-            frame_debug.append({"w": w, **descriptors})
+            frame_debug.append({"w": w_used, **desc_used})
+
+        # TRACK-ordered diagnostics. A/S/V are the assigned slot's descriptors
+        # at EVERY frame (incl. frame 0); w is the weight actually used in
+        # fusion (NaN on frame 0, where there is no fusion).
+        track_diag = {
+            "track_assigned_slot": np.array(assignment, dtype=int),
+            "track_A": np.array([slot_desc[assignment[k]]["size_norm"] for k in range(2)]),
+            "track_S": np.array([slot_desc[assignment[k]]["span_norm"] for k in range(2)]),
+            "track_V": np.array([slot_desc[assignment[k]]["var_norm"] for k in range(2)]),
+            "track_w": np.array([d["w"] for d in frame_debug], dtype=float),
+            "track_pred_position": (np.stack(pred_positions) if initialized
+                                    else np.full((2, 2), np.nan)),
+            "assoc_cost_identity_deg": costs["cost_identity"],
+            "assoc_cost_swapped_deg": costs["cost_swapped"],
+        }
 
         self._assignments_history.append(assignment)
         self._cp_features_history.append(cp_features_t)
         self._posterior_history.append(frame_posteriors)
         self._debug_history.append(frame_debug)
+        self._track_diag_history.append(track_diag)
 
         return {
             "positions": updated_positions,
@@ -183,6 +281,7 @@ class CPWeightedFusionTracker:
             "cp_features": cp_features_t,
             "posteriors": frame_posteriors,
             "debug": frame_debug,
+            "track_diag": track_diag,
         }
 
     def run(self, likelihood_maps, cp_regions, estimated_positions):
@@ -197,13 +296,28 @@ class CPWeightedFusionTracker:
         Returns
         -------
         result : dict, output-compatible with TwoSpeakerTracker.run()
-            "tracks"         : list of np.ndarray, shape (T, 2) — one per speaker
-            "assignments"    : np.ndarray, shape (T, 2)
-            "cp_features"    : list of list of dict, shape (T, 2)
-            "posterior_maps" : np.ndarray, shape (T, 2, nele, nazi) — belief maps b_t,k
+            "tracks"         : list of np.ndarray, shape (T, 2) — one per TRACK
+            "assignments"    : np.ndarray, shape (T, 2) — [t, k] = IDL slot given to track k
+            "cp_features"    : list of list of dict, shape (T, 2) — IDL-SLOT order
+                               (NOT reordered by association; same object as
+                               "slot_cp_features")
+            "posterior_maps" : np.ndarray, shape (T, 2, nele, nazi) — belief maps b_t,k (TRACK order)
             "debug"          : dict with extra diagnostic information, including
-                                per-frame/per-speaker "w", "size_norm", "span_norm",
-                                "var_norm" (each np.ndarray, shape (T, 2))
+                                per-frame/per-TRACK "w", "size_norm", "span_norm",
+                                "var_norm" (each np.ndarray, shape (T, 2); NaN at frame 0)
+
+            Explicitly named additions (TRACK order = [t, k] refers to persistent track k):
+            "slot_cp_features"        : alias of "cp_features" (IDL-slot order)
+            "track_assigned_slot"     : (T, 2) int  — IDL slot whose package track k received
+            "track_A"                 : (T, 2) — normalized CP area of that slot (= size_norm)
+            "track_S"                 : (T, 2) — normalized CP span of that slot (= span_norm)
+            "track_V"                 : (T, 2) — normalized CP spatial variance (= var_norm)
+            "track_w"                 : (T, 2) — fusion weight used (NaN at frame 0)
+            "track_pred_position"     : (T, 2, 2) — predicted [el_idx, az_idx] used for
+                                        association (NaN at frame 0)
+            "assoc_cost_identity_deg" : (T,) — total great-circle cost of slot0->track0, slot1->track1
+            "assoc_cost_swapped_deg"  : (T,) — total great-circle cost of slot1->track0, slot0->track1
+            "assoc_cost_gap_deg"      : (T,) — |identity - swapped| (NaN at frame 0)
         """
         likelihood_maps = np.asarray(likelihood_maps, dtype=float)
         cp_regions = np.asarray(cp_regions, dtype=float)
@@ -236,97 +350,47 @@ class CPWeightedFusionTracker:
             for key in debug_keys
         }
 
+        diag = {key: np.stack([np.asarray(fr[key]) for fr in self._track_diag_history], axis=0)
+                for key in self._track_diag_history[0]}
+        diag["assoc_cost_gap_deg"] = np.abs(diag["assoc_cost_identity_deg"]
+                                            - diag["assoc_cost_swapped_deg"])
+
         return {
             "tracks": tracks,
             "assignments": np.array(self._assignments_history),          # (T, 2)
-            "cp_features": self._cp_features_history,                    # (T, 2, dict)
+            "cp_features": self._cp_features_history,                    # (T, 2, dict) SLOT order
+            "slot_cp_features": self._cp_features_history,               # explicit alias
             "posterior_maps": np.stack(self._posterior_history, axis=0),  # (T, 2, nele, nazi)
             "debug": {
                 "n_frames": T,
                 "grid_shape": likelihood_maps.shape[2:],
                 **debug_arrays,
             },
+            **diag,
         }
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _update_single_track(self, prev_belief, measurement, cp_features, likelihood_map):
-        """Update one track's belief via CP-weighted fusion (see module docstring).
-
-        Parameters
-        ----------
-        prev_belief   : np.ndarray, shape (nele, nazi), or None
-            b_t-1,k. None on frame 0 -- no prior belief available yet.
-        measurement   : np.ndarray, shape (2,)
-            Assigned detector measurement [el_idx, az_idx]. Used only for
-            frame-0 initialisation.
-        cp_features   : dict
-            Output of extract_cp_features for this speaker's region.
-        likelihood_map : np.ndarray, shape (nele, nazi)
-            Raw (unnormalised) likelihood map from the upstream model.
-
-        Returns
-        -------
-        updated_position : np.ndarray, shape (2,)
-            argmax(belief), grid-cell indices (float).
-        belief : np.ndarray, shape (nele, nazi)
-            b_t,k, normalised to sum to 1.
-        w : float
-            CP-aware fusion weight used this frame (np.nan on frame 0, where
-            there is no prediction to fuse against).
-        descriptors : dict
-            {"size_norm", "span_norm", "var_norm"} (np.nan-filled on frame 0).
-        """
-        measurement = np.asarray(measurement, dtype=float)
-        likelihood_map = np.asarray(likelihood_map, dtype=float)
-        grid_shape = likelihood_map.shape  # (nele, nazi)
-        nele, nazi = grid_shape
-
-        # p_tilde: full normalized likelihood map (never reduced to a peak).
-        p_tilde = np.clip(likelihood_map, 0.0, None)
-        psum = p_tilde.sum()
+    @staticmethod
+    def _normalized_likelihood_folded(likelihood_map):
+        """p_t,m: full likelihood map of one slot, clipped at 0, folded onto the
+        nazi-1 distinct azimuths (duplicate +-pi columns AVERAGED -- two
+        evaluations of one direction), normalised to sum to 1. Never reduced
+        to a peak."""
+        p = fold_azimuth_endpoint(np.clip(np.asarray(likelihood_map, dtype=float), 0.0, None),
+                                  kind="likelihood")
+        psum = p.sum()
         if psum > _EPS:
-            p_tilde = p_tilde / psum
-        else:
-            # Degenerate all-zero/negative likelihood map: fall back to
-            # uniform rather than propagating NaN.
-            p_tilde = np.full(grid_shape, 1.0 / (nele * nazi))
+            return p / psum
+        # Degenerate all-zero/negative map: uniform rather than NaN.
+        return np.full(p.shape, 1.0 / p.size)
 
-        # ---- Frame 0: no prior belief available --------------------------
-        if prev_belief is None:
-            belief = p_tilde
-            position = measurement.copy()  # mirrors TwoSpeakerTracker's frame-0 convention
-            descriptors = {"size_norm": np.nan, "span_norm": np.nan, "var_norm": np.nan}
-            return position, belief, np.nan, descriptors
-
-        # ---- Frames 1+: T^T b_t-1,k, then CP-weighted fusion --------------
-        # Motion propagation over the ENTIRE previous belief map (fixed
-        # sigma_el/sigma_az, independent of CP -- CP affects only w below).
-        b_tilde = gaussian_filter(prev_belief, sigma=(self.sigma_el, self.sigma_az),
-                                   mode="constant")
-        bsum = b_tilde.sum()
-        if bsum > _EPS:
-            b_tilde = b_tilde / bsum
-        else:
-            b_tilde = np.full(grid_shape, 1.0 / (nele * nazi))
-
-        w, descriptors = compute_cp_weight(
-            cp_features, grid_shape,
-            lambda_var=self.lambda_var, lambda_size=self.lambda_size,
-            lambda_span=self.lambda_span,
-        )
-
-        belief = (1.0 - w) * b_tilde + w * p_tilde
-        bsum2 = belief.sum()
-        if bsum2 > _EPS:
-            belief = belief / bsum2
-        else:
-            belief = np.full(grid_shape, 1.0 / (nele * nazi))
-
-        peak_flat = np.argmax(belief)
-        peak_idx = np.unravel_index(peak_flat, grid_shape)
-        position = np.array([float(peak_idx[0]), float(peak_idx[1])])
-
-        return position, belief, w, descriptors
+    @staticmethod
+    def _argmax_position(belief_folded):
+        """argmax of a folded belief -> [el_idx, az_idx] (float). Folded column j
+        is original column j, so the index is valid on the (nele, nazi) grid;
+        the +-pi direction is reported as column 0."""
+        peak_idx = np.unravel_index(np.argmax(belief_folded), belief_folded.shape)
+        return np.array([float(peak_idx[0]), float(peak_idx[1])])

@@ -1,7 +1,7 @@
 """
 Minimal Localized Conformal Prediction (LCP) for the 2-speaker case, speaker-wise.
 
-Scope (first experiment only -- see /home/mayavb/.claude/plans/ok-we-need-to-lazy-pumpkin.md
+Scope (first experiment only -- see local planning notes
 for the full design discussion that led here):
   - 2-D raw context per (frame, speaker): X = [raw_mean, raw_peak_to_background],
     computed from the RAW likelihood map (before Code.utilities.normalize()).

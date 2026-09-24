@@ -44,6 +44,28 @@ def _safe_entropy(probabilities):
 # Public API
 # -----------------------------------------------------------------------
 
+def _periodic_azimuth_cells(rows, cols, nazi):
+    """Map active cells onto the nazi-1 distinct azimuths (col nazi-1 == col 0),
+    de-duplicate, and unwrap columns along the shortest circular arc that covers
+    all occupied columns.
+
+    Returns (rows, unwrapped_cols, arc_width_in_cells). The arc starts right
+    after the largest circular run of empty columns, so a compact region
+    straddling +-pi gets the same span/variance as the same region elsewhere.
+    """
+    n_az = nazi - 1
+    cells = np.unique(np.stack([rows, np.asarray(cols) % n_az], axis=1), axis=0)
+    r, c = cells[:, 0], cells[:, 1]
+    occ = np.unique(c)
+    if len(occ) == n_az:
+        start, width = 0, n_az
+    else:
+        gaps = np.diff(np.concatenate([occ, [occ[0] + n_az]])) - 1  # empty cols after each occupied col
+        i = int(np.argmax(gaps))
+        start, width = int(occ[(i + 1) % len(occ)]), int(n_az - gaps[i])
+    return r, (c - start) % n_az, float(width)
+
+
 def extract_cp_features(cp_region, likelihood_map=None, estimated_position=None):
     """Extract scalar uncertainty features from one speaker's CP region.
 
@@ -97,6 +119,15 @@ def extract_cp_features(cp_region, likelihood_map=None, estimated_position=None)
             np.nan if the CP region is empty.
             NOTE: this is a new 2-D spatial-dispersion feature for this
             tracker, not a generalization of any 1-D "gap variance" feature.
+
+        cp_width_az_periodic, cp_width_total_periodic, cp_var_periodic : float
+            Azimuth-periodic versions of cp_width_az / cp_width_total / cp_var
+            (see _periodic_azimuth_cells): cells on the nazi-1 distinct
+            azimuths, span = shortest covering circular arc, variance after
+            unwrapping along it. Elevation unchanged. Identical to the old
+            values for regions that don't touch the +-pi seam. These are what
+            cp_weight.compute_cp_weight uses for S and V. (The old keys are kept
+            unchanged because TwoSpeakerTracker reads cp_width_az.)
 
         cp_entropy : float
             Shannon entropy (nats) of the likelihood distribution restricted
@@ -160,6 +191,25 @@ def extract_cp_features(cp_region, likelihood_map=None, estimated_position=None)
         cp_var = float(np.var(rows) + np.var(cols))
 
     # ------------------------------------------------------------------
+    # Azimuth-periodic span / dispersion (used by cp_weight.compute_cp_weight)
+    # ------------------------------------------------------------------
+    # The grid's azimuth axis is linspace(-pi, pi, nazi): columns 0 and nazi-1 are
+    # the same direction, so there are nazi-1 distinct azimuths on a circle.
+    # Cells are mapped to that circle (col nazi-1 -> 0) and de-duplicated; the
+    # azimuth span is the shortest circular arc covering all occupied columns,
+    # and the azimuth variance is taken after unwrapping the columns along that
+    # arc. Elevation is unchanged (not periodic). Units stay grid cells, so for
+    # any region that does not touch the +-pi seam these equal the old values.
+    if cp_area == 0:
+        cp_width_az_periodic = np.nan
+        cp_width_total_periodic = np.nan
+        cp_var_periodic = np.nan
+    else:
+        p_rows, p_cols, cp_width_az_periodic = _periodic_azimuth_cells(rows, cols, nazi)
+        cp_width_total_periodic = float(np.sqrt(cp_width_el ** 2 + cp_width_az_periodic ** 2))
+        cp_var_periodic = float(np.var(p_rows) + np.var(p_cols))
+
+    # ------------------------------------------------------------------
     # Likelihood-based features
     # ------------------------------------------------------------------
     if likelihood_map is None or cp_area == 0:
@@ -200,6 +250,9 @@ def extract_cp_features(cp_region, likelihood_map=None, estimated_position=None)
         "cp_width_az": cp_width_az,
         "cp_width_total": cp_width_total,
         "cp_var": cp_var,
+        "cp_width_az_periodic": cp_width_az_periodic,
+        "cp_width_total_periodic": cp_width_total_periodic,
+        "cp_var_periodic": cp_var_periodic,
         "cp_entropy": cp_entropy,
         "peak_likelihood": peak_likelihood,
         "mass_inside_cp": mass_inside_cp,
